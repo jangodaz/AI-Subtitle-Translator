@@ -13,14 +13,13 @@ class APIKeyRotator:
     """
     Manages a rotation of API keys, handling key unavailability.
     """
-
     def __init__(self, api_keys):
         if not api_keys:
             raise ValueError("At least one API key must be provided")
         self.api_keys = api_keys
         self.current_key_index = 0
         self.unavailable_keys = set()
-        logging.info(f"API Key Rotator initialized with {len(api_keys)} keys.")
+        logging.info(f"APIKeyRotator initialized with {len(api_keys)} keys.")
 
     def get_current_key(self):
         """Returns the current API key."""
@@ -51,10 +50,9 @@ class SRTTranslator:
     Translates SRT subtitle files using the Gemini API with API key rotation,
     retry logic, and progress saving.
     """
-
     def __init__(
-        self, api_keys, base_delay=30, max_backoff=300, context_blocks_count=2
-    ):  # Added context_blocks_count
+        self, api_keys, base_delay=30, max_backoff=300, context_blocks_count=2, batch_size=20
+    ):
         self.key_rotator = APIKeyRotator(api_keys)
         self.model = self._initialize_model()
         self.last_request_time = 0
@@ -62,12 +60,13 @@ class SRTTranslator:
         self.max_retries = 5
         self.max_backoff = max_backoff
         self.context_blocks_count = context_blocks_count
+        self.batch_size = batch_size
 
         self.srt_block_count_regex = re.compile(
             r"^\d+\s*\n\d{2}:\d{2}:\d{2},\d{3}\s*-->", re.MULTILINE
         )
         self.srt_first_block_regex = re.compile(
-            r"^\d+\s*\n\d{2}:\d{2}:\d{2},\d{3}", re.MULTILINE
+            r"^\d+\s*\n\d{2}:\d{2}:\d{2},\د{3}", re.MULTILINE
         )
         self.srt_block_split_regex = re.compile(r"\n\s*\n")
         self.srt_block_number_regex = re.compile(r"^\d+\s*$")
@@ -79,9 +78,9 @@ class SRTTranslator:
         """Initializes the Gemini generative model with API key and settings."""
         genai.configure(api_key=self.key_rotator.get_current_key())
         generation_config = {
-            "temperature": 1,
-            "top_p": 0.95,
-            "top_k": 64,
+            "temperature": 0.4,
+            "top_p": 0.5,
+            "top_k": 20,
             "max_output_tokens": 8192,
         }
 
@@ -94,7 +93,7 @@ class SRTTranslator:
 
         logging.info("Gemini model initialized.")
         return genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
+            model_name="gemini-2.0-flash-lite",
             generation_config=generation_config,
             safety_settings=safety_settings,
         )
@@ -203,7 +202,7 @@ class SRTTranslator:
         """Extracts valid SRT blocks from a content string."""
         first_block_match = self.srt_first_block_regex.search(content)
         if first_block_match:
-            content = content[first_block_match.start() :]
+            content = content[first_block_match.start():]
         blocks = [
             block.strip()
             for block in self.srt_block_split_regex.split(content)
@@ -308,9 +307,7 @@ class SRTTranslator:
         block_retry_counts = {}
         expected_block_number = start_block_number
 
-        system_message_base = f"""You are an expert subtitle translator, specializing in {input_lang} to {output_lang} translations. Your goal is to produce subtitles of the highest possible quality, indistinguishable from those created by a professional human translator.  Pay close attention to cultural nuances, idiomatic expressions, and the natural flow of conversation in {output_lang}. Ensure perfect SRT format, including numbering from {{}}, accurate timings, and proper structure.  Avoid adding any extra text or commentary. Translate with a style that is consistent with the context of the video content.""".format(
-            "{}"
-        )
+        system_message_base = f"""Translate the following subtitle text into Persian, ensuring semantic coherence across all lines. Maintain the context of the dialogue, keep the tone natural and suitable for Persian subtitles, and ensure the translation aligns with the original meaning of the video content. Avoid literal translations if they disrupt fluency."""
 
         try:
             if not translated_content:
@@ -343,47 +340,47 @@ class SRTTranslator:
 
             block_index = start_block_number - 1
             while block_index < len(all_blocks_english):
-                block_english = all_blocks_english[block_index]
-                current_block_number_english = block_english.splitlines()[0]
-
                 if cancel_check and cancel_check():
                     logging.info("Translation cancelled during block processing")
                     if status_callback:
                         status_callback("Translation cancellation requested")
                     return
 
-                system_message = system_message_full.format(expected_block_number)
+                # تعیین محدوده بلوک‌های دسته‌ای
+                batch_end_index = min(block_index + self.batch_size, len(all_blocks_english))
+                batch_blocks = all_blocks_english[block_index:batch_end_index]
+                batch_block_numbers = [b.splitlines()[0] for b in batch_blocks]
+                start_batch_number = expected_block_number
+                end_batch_number = expected_block_number + len(batch_blocks) - 1
 
-                context_blocks = []
-                for i in range(
-                    max(0, block_index - self.context_blocks_count), block_index + 1
-                ):
-                    context_blocks.append(all_blocks_english[i])
+                # جمع‌آوری بلوک‌های زمینه (context) برای کل دسته
+                context_start_index = max(0, block_index - self.context_blocks_count)
+                context_blocks = all_blocks_english[context_start_index:batch_end_index]
                 english_blocks_batch = "\n\n".join(context_blocks)
-                current_block_in_batch_number_english = context_blocks[-1].splitlines()[
-                    0
-                ]
 
                 try:
-                    prompt_message = f"""{system_message}\n\nContext English SRT blocks (including block number {current_block_in_batch_number_english}):\n{english_blocks_batch}\n\nTranslate ONLY the LAST English SRT block from the above context into a natural and idiomatic {output_lang} SRT block, ensuring it reads as if originally written in {output_lang} by a native speaker. The output should be in perfect SRT format, starting with block number {expected_block_number}, and should capture the nuances and tone of the original English dialogue based on the context of the provided blocks, without sounding like a machine translation. Focus on delivering human-quality subtitles.\n\nOutput ONLY the {output_lang} SRT block in perfect format for block number {expected_block_number}."""
+                    system_message = system_message_full.format(
+                        start_block=start_batch_number, end_block=end_batch_number
+                    )
+                    prompt_message = f"""{system_message}\n\nContext English SRT blocks (including blocks {batch_block_numbers[0]} to {batch_block_numbers[-1]}):\n{english_blocks_batch}\n\nTranslate ALL the English SRT blocks from the above context into natural and idiomatic {output_lang} SRT blocks, ensuring they read as if originally written in {output_lang} by a native speaker. The output should be in perfect SRT format, with block numbers starting from {start_batch_number} to {end_batch_number}, and should capture the nuances and tone of the original English dialogue based on the context of the provided blocks, without sounding like a machine translation. Focus on delivering human-quality subtitles.\n\nOutput ONLY the {output_lang} SRT blocks in perfect format for block numbers {start_batch_number} to {end_batch_number}, separated by double newlines."""
                     response = await self._make_api_request(
-                        chat, prompt_message, expected_block_number
+                        chat, prompt_message, f"{start_batch_number}-{end_batch_number}"
                     )
 
+                    # استخراج بلوک‌های ترجمه‌شده
                     extracted_blocks = self.extract_srt_blocks(response.text)
-                    if extracted_blocks:
-                        block_persian = extracted_blocks[0]
-                        block_lines = block_persian.splitlines()
-                        block_persian_renumbered = "\n".join(
-                            [str(expected_block_number)] + block_lines[1:]
-                        )
-                        translated_content[str(expected_block_number)] = (
-                            block_persian_renumbered
-                        )
+                    if len(extracted_blocks) == len(batch_blocks):
+                        for i, block_persian in enumerate(extracted_blocks):
+                            block_lines = block_persian.splitlines()
+                            expected_number = start_batch_number + i
+                            block_persian_renumbered = "\n".join(
+                                [str(expected_number)] + block_lines[1:]
+                            )
+                            translated_content[str(expected_number)] = block_persian_renumbered
 
                         current_blocks = len(translated_content)
                         logging.info(
-                            f"Translated block {current_block_number_english} as {expected_block_number} ({current_blocks}/{total_blocks})"
+                            f"Translated batch blocks {batch_block_numbers[0]} to {batch_block_numbers[-1]} as {start_batch_number} to {end_batch_number} ({current_blocks}/{total_blocks})"
                         )
                         if status_callback:
                             status_callback(
@@ -398,60 +395,46 @@ class SRTTranslator:
                                     translated_content, f, ensure_ascii=False, indent=4
                                 )
 
-                        block_index += 1
-                        expected_block_number += 1
+                        block_index += len(batch_blocks)
+                        expected_block_number += len(batch_blocks)
                         block_retry_counts = {}
 
                     else:
-                        block_retry_counts[current_block_number_english] = (
-                            block_retry_counts.get(current_block_number_english, 0) + 1
-                        )
-                        if (
-                            block_retry_counts[current_block_number_english]
-                            <= self.max_retries
-                        ):
-                            retry_attempt = block_retry_counts[
-                                current_block_number_english
-                            ]
+                        batch_key = f"batch_{start_batch_number}-{end_batch_number}"
+                        block_retry_counts[batch_key] = block_retry_counts.get(batch_key, 0) + 1
+                        if block_retry_counts[batch_key] <= self.max_retries:
+                            retry_attempt = block_retry_counts[batch_key]
                             logging.warning(
-                                f"No SRT block in response for block {current_block_number_english}, retry {retry_attempt}/{self.max_retries}."
+                                f"No or incorrect SRT blocks in response for batch {batch_key}, retry {retry_attempt}/{self.max_retries}."
                             )
-                            await asyncio.sleep(
-                                self._calculate_backoff(retry_attempt - 1)
-                            )
+                            await asyncio.sleep(self._calculate_backoff(retry_attempt - 1))
                             continue
                         else:
-                            error_message = f"Failed to get SRT block for block {current_block_number_english} after {self.max_retries} retries."
+                            error_message = f"Failed to get SRT blocks for batch {batch_key} after {self.max_retries} retries."
                             logging.error(error_message)
                             if status_callback:
                                 status_callback(
-                                    f"Failed block {current_block_number_english} after retries (No SRT response)."
+                                    f"Failed batch {batch_key} after retries (No SRT response)."
                                 )
                             raise Exception(error_message)
 
                 except Exception as e:
-                    logging.error(
-                        f"Error translating block {current_block_number_english}: {e}"
-                    )
-                    block_retry_counts[current_block_number_english] = (
-                        block_retry_counts.get(current_block_number_english, 0) + 1
-                    )
-                    if (
-                        block_retry_counts[current_block_number_english]
-                        <= self.max_retries
-                    ):
-                        retry_attempt = block_retry_counts[current_block_number_english]
+                    batch_key = f"batch_{start_batch_number}-{end_batch_number}"
+                    logging.error(f"Error translating batch {batch_key}: {e}")
+                    block_retry_counts[batch_key] = block_retry_counts.get(batch_key, 0) + 1
+                    if block_retry_counts[batch_key] <= self.max_retries:
+                        retry_attempt = block_retry_counts[batch_key]
                         logging.warning(
-                            f"Exception translating block {current_block_number_english}, retry {retry_attempt}/{self.max_retries}."
+                            f"Exception translating batch {batch_key}, retry {retry_attempt}/{self.max_retries}."
                         )
                         await asyncio.sleep(self._calculate_backoff(retry_attempt - 1))
                         continue
                     else:
-                        error_message = f"Failed to translate block {current_block_number_english} after {self.max_retries} retries due to errors. Error: {e}"
+                        error_message = f"Failed to translate batch {batch_key} after {self.max_retries} retries due to errors. Error: {e}"
                         logging.error(error_message)
                         if status_callback:
                             status_callback(
-                                f"Failed block {current_block_number_english} after retries due to errors."
+                                f"Failed batch {batch_key} after retries due to errors."
                             )
                         raise Exception(error_message)
 
@@ -473,11 +456,13 @@ class SRTTranslator:
 
 async def main():
     api_keys = [
-        "API-1",
-        "API_2",
+        #"AIzaSyB9k5Doy24uksKFuWi5aQFv_84wJSn2fRM",
+        #"AIzaSyAAA9VBKGDccRJ0W1C5_N4VlbJBFQ58B4s",
+        #"AIzaSyAt5Kj20Owbeokp-OgGQI9NFXlDQCx5KiE",
+        "AIzaSyD_AF2MtXMG2UJuM6fTQsMEdJZqu6lFSuA",
     ]
     translator = SRTTranslator(
-        api_keys, base_delay=20, max_backoff=240, context_blocks_count=2
+        api_keys, base_delay=20, max_backoff=240, context_blocks_count=2, batch_size=50
     )
     try:
         await translator.translate_file(
